@@ -23,6 +23,7 @@ import { duplicateKeyDetector } from "../utils/duplicateKeyDetector";
 import {
 	getMimeType,
 	isBinaryFile,
+	isTemporaryFile,
 	stringToArrayBuffer,
 } from "../utils/fileUtils";
 import { batchExtractZip } from "../utils/zipUtils";
@@ -337,22 +338,40 @@ export const FileTreeProvider: React.FC<FileTreeProviderProps> = ({
 							: docUrl;
 						const collectionName = `yjs_${createdDocId}`;
 
-						const { doc: newYDoc } = collabService.connect(
-							projectId,
-							collectionName,
-						);
+						const signalingServersSetting = getSetting("collab-signaling-servers");
+						const awarenessTimeoutSetting = getSetting("collab-awareness-timeout");
+						const autoReconnectSetting = getSetting("collab-auto-reconnect");
 
-						await new Promise((resolve) => setTimeout(resolve, 100));
+						// Only proceed if all collaboration settings are available
+						if (signalingServersSetting && awarenessTimeoutSetting && autoReconnectSetting) {
+							const signalingServers = signalingServersSetting.value as string;
+							const awarenessTimeout = awarenessTimeoutSetting.value as number;
+							const autoReconnect = autoReconnectSetting.value as boolean;
 
-						newYDoc.transact(() => {
-							const ytext = newYDoc.getText("codemirror");
-							if (ytext.length === 0) {
-								ytext.insert(0, textContent);
-							}
-						});
-						collabService.disconnect(projectId, collectionName);
+							const serversToUse = signalingServers.split(",").map((s) => s.trim());
 
-						setupFileSyncListener(createdDocId, fileId);
+							const { doc: newYDoc } = collabService.connect(
+								projectId,
+								collectionName,
+								{
+									signalingServers: serversToUse,
+									autoReconnect,
+									awarenessTimeout: awarenessTimeout * 1000,
+								},
+							);
+
+							await new Promise((resolve) => setTimeout(resolve, 100));
+
+							newYDoc.transact(() => {
+								const ytext = newYDoc.getText("codemirror");
+								if (ytext.length === 0) {
+									ytext.insert(0, textContent);
+								}
+							});
+							collabService.disconnect(projectId, collectionName);
+
+							setupFileSyncListener(createdDocId, fileId);
+						}
 					}
 
 					await refreshFileTree();
@@ -373,7 +392,7 @@ export const FileTreeProvider: React.FC<FileTreeProviderProps> = ({
 				console.error("Error linking file to document:", error);
 			}
 		},
-		[changeDoc, doc, refreshFileTree, docUrl, setupFileSyncListener],
+		[changeDoc, doc, refreshFileTree, docUrl, setupFileSyncListener, getSetting],
 	);
 
 	const unlinkFileFromDocument = useCallback(
@@ -452,6 +471,11 @@ export const FileTreeProvider: React.FC<FileTreeProviderProps> = ({
 					.map((id) => allFiles.find((f) => f.id === id))
 					.filter(Boolean) as FileNode[];
 
+				// Check if any files are temporary
+				const hasTemporaryFiles = filesToDelete.some(file =>
+					isTemporaryFile(file.path)
+				);
+
 				// Check for directories and collect all children
 				const allFilesToDelete: string[] = [];
 
@@ -478,7 +502,9 @@ export const FileTreeProvider: React.FC<FileTreeProviderProps> = ({
 					allFilesToDelete.push(file.id);
 				}
 
-				await fileStorageService.batchDeleteFiles(allFilesToDelete);
+				await fileStorageService.batchDeleteFiles(allFilesToDelete, {
+					hardDelete: hasTemporaryFiles
+				});
 
 				// Update selected file if any deleted files were selected
 				if (selectedFileId && allFilesToDelete.includes(selectedFileId)) {
